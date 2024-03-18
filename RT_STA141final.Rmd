@@ -1,0 +1,985 @@
+---
+title: "STA141 Final Project"
+author: "Ruba Thekkath"
+date: "2024-03-09"
+output:
+  html_document:
+    toc: true
+    theme: united
+    toc_float: true
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+```
+
+## About This Report
+
+Data science involves the use of statistical and computational tools to extract meaningful information from often messy and convoluted sets of data. It can also be used to make additional predictions on new data based on models built from our given dataset. In this report, we are given data from experiments in the paper: *Distributed Coding of Choice, Action and Engagement Across the Mouse Brain* and are tasked with predicting trial feedback given the neural activity of a mouse. To do this, we must carry out a basic data science pipeline: exploratory analysis, data integration, and predictive modeling. We will then be given an unlabeled dataset for which we must correctly predict feedback. 
+
+## Section I Introduction 
+
+The research paper *Distributed Coding of Choice, Action and Engagement Across the Mouse Brain* looked at the neuronal activity in four different mice as they made decisions based on visual contrast. The data includes each brain area's spike activity over the trial period, the contrast of the stimuli, and the feedback which could be 1 or -1 corresponding to a right or wrong answer. The goal of this project is to correctly predict the feedback given data on neuronal activity, time, and contrast using various classification and prediction methods. 
+
+
+## Section II Exploratory Data Analysis 
+
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(knitr))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(tibble))
+suppressPackageStartupMessages(library(UpSetR))
+suppressPackageStartupMessages(library(plyr))
+suppressPackageStartupMessages(library("corrr"))
+suppressPackageStartupMessages(library(ggcorrplot))
+suppressPackageStartupMessages(library(ggfortify))
+suppressPackageStartupMessages(library("factoextra"))
+suppressPackageStartupMessages(library(reshape2))
+suppressPackageStartupMessages(library(caret))
+suppressPackageStartupMessages(library(ROCR))
+suppressPackageStartupMessages(library(pROC))
+suppressPackageStartupMessages(library(PRROC))
+suppressPackageStartupMessages(library(MLeval))
+suppressPackageStartupMessages(library(cowplot))
+
+```
+
+```{r, cache=TRUE}
+# load dataset
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('./Data/session',i,'.rds',sep=''))
+  #print(session[[i]]$mouse_name)
+  # print(session[[i]]$date_exp)
+}
+```
+
+```{r}
+summary(session[[18]])
+
+# feedback_type
+n.session=length(session)
+
+n_success = 0
+n_trial = 0
+for(i in 1:n.session){
+    tmp = session[[i]];
+    n_trial = n_trial + length(tmp$feedback_type);
+    n_success = n_success + sum(tmp$feedback_type == 1);
+}
+n_success/n_trial
+```
+
+As shown above, Over 70% trials are success. 
+
+
+####  2.1 Data Structure 
+
+```{r}
+n.session=length(session)
+
+# in library tidyverse
+meta <- tibble(
+  mouse_name = rep('name',n.session),
+  date_exp =rep('dt',n.session),
+  n_brain_area = rep(0,n.session),
+  n_neurons = rep(0,n.session),
+  n_trials = rep(0,n.session),
+  success_rate = rep(0,n.session)
+)
+colnames(meta)[3] = "brain areas"
+colnames(meta)[4] = "neurons"
+colnames(meta)[5] = "trials"
+
+for(i in 1:n.session){
+  tmp = session[[i]]
+  meta[i,1]=tmp$mouse_name;
+  meta[i,2]=tmp$date_exp;
+  meta[i,3]=length(unique(tmp$brain_area));
+  meta[i,4]=dim(tmp$spks[[1]])[1];
+  meta[i,5]=length(tmp$feedback_type);
+  meta[i,6]=mean(tmp$feedback_type+1)/2;
+  
+}
+kable(meta, format = "html", table.attr = "class='table table-striped'",digits=2) 
+
+```
+
+As shown in the summary table, four mice were tested, each with varying number of trials and success rates. Of the four mice, Lederberg has the highest success rate (the stimuli conditions that the mice experiences are contrast on the left and right which can vary from 0 to 1. Feedback can be 1 for success and -1 for failure). 
+
+
+####  2.2 Descriptive Statistics  
+```{r}
+# Get average summary statistics by mouse
+summary_stat = data.frame(matrix(nrow=8, ncol=4))
+rownames(summary_stat) = c("average success", "sd success","average brain areas", "sd brain areas", "average neurons",  "sd neurons", "average trials", "sd trials")
+
+for (i in unique(meta$mouse_name)){
+  summary_stat[1, i] = meta %>% filter(mouse_name==i) %>% summarise(mean = mean(success_rate)) %>% pull(mean)
+  summary_stat[2, i] = meta %>% filter(mouse_name==i) %>% summarise(sd = sd(success_rate)) %>% pull(sd)
+  summary_stat[3, i] = meta %>% filter(mouse_name==i) %>% summarise(mean = mean(`brain areas`)) %>% pull(mean)
+  summary_stat[4, i] = meta %>% filter(mouse_name==i) %>% summarise(sd = sd(`brain areas`)) %>% pull(sd)
+  summary_stat[5, i] = meta %>% filter(mouse_name==i) %>% summarise(mean = mean(neurons)) %>% pull(mean)
+  summary_stat[6, i] = meta %>% filter(mouse_name==i) %>% summarise(sd = sd(neurons)) %>% pull(sd)
+  
+  summary_stat[7, i] = meta %>% filter(mouse_name==i) %>% summarise(mean = mean(trials)) %>% pull(mean)
+  summary_stat[8, i] = meta %>% filter(mouse_name==i) %>% summarise(sd = sd(trials)) %>% pull(sd)
+
+  
+  
+}
+
+summary_stat = subset(summary_stat, select=-c(1:4))
+
+kable(summary_stat, format = "html", table.attr = "class='table table-striped'",digits=2) 
+
+
+
+# Plot success rate distribution
+p1 <- meta  %>% ggplot() + geom_boxplot(aes(mouse_name, success_rate)) + ggtitle("Success Rate")
+
+# Plot brain areas distribution
+p2 <- meta  %>% ggplot() + geom_boxplot(aes(mouse_name, `brain areas`)) + ggtitle("Brain Areas")
+# not going to plot because I'm not sure all of the brain areas in meta are unique
+
+
+# Plot neurons distribution
+p3 <- meta  %>% ggplot() + geom_boxplot(aes(mouse_name, neurons)) + ggtitle("Neurons")
+
+# Plot trials distribution
+p4 <- meta  %>% ggplot() + geom_boxplot(aes(mouse_name, trials)) + ggtitle("Trials")
+
+# Arrange the plots
+plot_grid(p1, p2, p3, p4, nrow = 2, ncol = 2)
+
+```
+
+From these plots, we can see that Lederberg has a significantly higher success rate compared to the other mice. This could be important to note when we are creating predictive models as the neural activity of Lederberg may be more informative for accurately predicting feedback. We can see that Forssmann has the highest total number of neurons but this does not seem to affect its success rate, which implies that it is the identity of the brain area in which we see a spike that is correlated to the feedback. 
+
+
+####  2.3 Exploring Neural Activities During Each Trial 
+
+```{r}
+
+i.s=17 # indicator for this session
+i.t=1 # indicator for this trial
+
+spk.trial = session[[i.s]]$spks[[i.t]]
+area=session[[i.s]]$brain_area
+# First calculate the number of spikes for each neuron during this trial 
+spk.count=apply(spk.trial,1,sum)
+
+# Next we take the average of spikes across neurons that live in the same area 
+
+# tapply():
+spk.average.tapply=tapply(spk.count, area, mean)
+
+# dplyr: 
+# To use dplyr you need to create a data frame
+tmp <- data.frame(
+  area = area,
+  spikes = spk.count
+)
+# Calculate the average by group using dplyr
+spk.average.dplyr =tmp %>%
+  group_by(area) %>%
+  summarize(mean= mean(spikes))
+
+# Wrapping up the function:
+
+
+average_spike_area<-function(i.t,this_session){
+
+spk.trial = this_session$spks[[i.t]]
+area= this_session$brain_area
+spk.count=apply(spk.trial,1,sum)
+spk.average.tapply=tapply(spk.count, area, mean)
+return(spk.average.tapply)
+}
+
+# Test the function
+average_spike_area(1,this_session = session[[i.s]])
+
+n.trial=length(session[[i.s]]$feedback_type)
+n.area=length(unique(session[[i.s]]$brain_area ))
+
+# Create a data frame that contain the average spike counts for each area, feedback type,  the two contrasts, and the trial id
+
+trial.summary =matrix(nrow=n.trial,ncol= n.area+1+2+1)
+
+
+for(i.t in 1:n.trial){
+  trial.summary[i.t,]=c(average_spike_area(i.t,this_session = session[[i.s]]),session[[i.s]]$feedback_type[i.t],session[[i.s]]$contrast_left[i.t],session[[i.s]]$contrast_left[i.s],i.t)
+
+}
+colnames(trial.summary)=c(names(average_spike_area(i.t,this_session = session[[i.s]])), 'feedback', 'left contr.','right contr.','id' )
+# id corresponds to trial # 
+
+# Turning it into a data frame
+trial.summary <- as_tibble(trial.summary)
+
+area.col=rainbow(n=n.area,alpha=0.7) # color code entries in n.area
+
+plot(0~1, col='white',xlim=c(0,n.trial),ylim=c(0.5,4), xlab="Trials",ylab="Average spike counts", main=paste("Spikes per area in Session", i.s))
+for(i in 1:n.area){
+  lines(y=trial.summary[[i]],x=trial.summary$id,col=area.col[i],lty=2,lwd=1)
+  lines(smooth.spline(trial.summary$id, trial.summary[[i]]),col=area.col[i],lwd=3)
+  }
+
+legend("topright", 
+  legend = colnames(trial.summary)[1:n.area], 
+  col = area.col, 
+  lty = 1, 
+  cex = 0.8
+)
+
+```
+
+The graph's dotted lines depict the average spike count across distinct brain areas of the Lederberg mice in session 17, while the solid lines represent the smoothed averages of these counts. There appears to be a correlation between certain areas, such as MEA and root, as well as LD and VPL, showing similar patterns. Additionally, there seems to be a trend towards increased activity in the LD area at the beginning and end of the trials.
+
+
+
+####  2.4 Exploring Changes Across Trials
+
+
+```{r}
+plot.trial<-function(i.t,area, area.col,this_session){
+    spks=this_session$spks[[i.t]];
+    n.neuron=dim(spks)[1]
+    time.points=this_session$time[[i.t]]
+    
+    plot(0,0,xlim=c(min(time.points),max(time.points)),ylim=c(0,n.neuron+1),col='white', xlab='Time (s)',yaxt='n', ylab='Neuron', main=paste('Trial ',i.t, 'feedback', this_session$feedback_type[i.t] ),cex.lab=1.5)
+    for(i in 1:n.neuron){
+        i.a=which(area== this_session$brain_area[i]);
+        col.this=area.col[i.a]
+        
+        ids.spike=which(spks[i,]>0) # find out when there are spikes 
+        if( length(ids.spike)>0 ){
+            points(x=time.points[ids.spike],y=rep(i, length(ids.spike) ),pch='.',cex=2, col=col.this)
+        }
+    }
+    
+legend("topright", 
+  legend = area, 
+  col = area.col, 
+  pch = 16, 
+  cex = 0.8
+  )
+  }
+varname=names(trial.summary);
+area=varname[1:(length(varname)-3)]
+```
+
+
+```{r}
+varname=names(trial.summary);
+area=varname[1:(length(varname)-3)]
+par(mfrow=c(1,2))
+plot.trial(1,area, area.col,session[[i.s]])
+plot.trial(2,area, area.col,session[[i.s]])
+```
+
+In the figure above, each dot represents a data point on the spike versus time graph. Notably, the root neuron exhibits a significantly higher frequency of expression compared to the other neurons. Furthermore, while the expression of other neurons appears less frequent, it remains relatively consistent throughout the trial duration.
+
+
+####  2.5 Explore Homogeneity & Heterogeniety (across sessions and mice)
+
+```{r}
+
+# Get brain areas present in each session for each mouse
+brains = c()
+for (i in 1:18){
+  tmp = session[[i]]
+  brains = unique(append(brains, unique(tmp$brain_area)))
+}
+
+brain.areas.s = data.frame(matrix(data=0, ncol = 4, nrow = length(brains)))
+colnames(brain.areas.s) = c(unique(meta$mouse_name))
+rownames(brain.areas.s) = brains
+for(i in 1:18){
+  tmp = session[[i]]
+  m = tmp$mouse_name
+  for(j in tmp$brain_area){
+    brain.areas.s[j, m] = 1
+  }
+}
+areas = c("Visual cortex", "Frontal cortex", "Hippocampus", "Basal ganglia", "Thalamus", "Midbrain")
+upset(brain.areas.s)
+
+```
+
+This graph is an UpSet plot, which is a visualization that allows you to analyze the intersection of sets, and here it shows the brain areas common among the different mice. Lederberg shows the largest number of active brain sites, with a considerable number of unique neurons exclusive to it (n=17). In contrast, Cori shows the smallest set size on the left, indicating fewer unique brain areas. Forssmann and Hench display numerous common brain areas along with additional intersections, as evidenced by multiple middle columns. This pattern aligns with the observed average success rates of the four mice, where Cori demonstrates the lowest success rate and Lederberg the highest.
+
+
+## Section III Data Integration
+
+####  3.1 Proposed Approach to Combine Data
+
+Since we aim to predict feedback based on mouse, trial contrast, and spike firing data from each trial, I took a look at the Time vs Neuron graph above, and it seems there's not much pattern in spike firing timing.
+
+So, to simplify the data analysis, I've decided to reduce the spike firing data dimensions from 2D (time vs spike) to 1D (spike) by removing the time component, which is similar to what the paper also does since it talks about using the spike firing rate (and removes the time component).
+
+Similarly, following the paper, I'll create a dataframe named 'spk_freq_2', which has spike frequency data for each brain area across all trials and sessions. Despite observing varying brain area activations across sessions, combining the data into one dataframe seems okay since I'll be summing spike frequencies per trial. 
+
+```{r, cache=TRUE}
+# function to get frequency of spikes by brain area across trials
+# input = session number, dataframe to be outputted
+# output = dataframe with columns corresponding to brain areas, rows corresponding to trial
+# cells = frequency of spike in brain area
+spk_freq <- function(ses, mouse_df, session_data){
+  n.session1.brain = length(unique(session_data[[ses]]$brain_area))
+  n.session1 = length(session_data[[ses]]$feedback_type)
+  mouse_df = data.frame(matrix(ncol=n.session1.brain))
+  colnames(mouse_df) = unique(session_data[[ses]]$brain_area)
+  mouse_df = mouse_df[-1,]
+  # loop through trials
+  # loop through columns (time) in spike datasets and count freq of neurons
+  this_session = session_data[[ses]]
+  n.time = length(session_data[[ses]]$time[[1]])
+    
+  for(i.t in 1:n.session1){
+    spks=this_session$spks[[i.t]];
+    n.neuron=dim(spks)[1]
+    time.points=this_session$time[[i.t]]
+    trial_sum = data.frame(matrix(ncol=n.session1.brain))
+    colnames(trial_sum) = unique(session_data[[ses]]$brain_area)
+    for(i in 1:n.time){
+        i.a=which(area== this_session$brain_area[i]);
+        col.this=area.col[i.a]
+        ids.spike=which(spks[,i]>0) # select rows with spikes
+        row_count = table(session_data[[ses]]$brain_area[ids.spike]) # get frequency of spike for each brain area
+        if(length(row_count) > 0){
+          trial_sum = rbind.fill(trial_sum, data.frame(rbind(row_count)))
+        }
+    }
+    trial_sum = data.frame(t(colSums(trial_sum, na.rm = TRUE))) # sum freq of spikes in each trial
+    mouse_df = rbind.fill(mouse_df, trial_sum)
+  }
+  mouse_df = cbind(session_data[[ses]]$contrast_left,mouse_df)
+  mouse_df = cbind(session_data[[ses]]$contrast_right,mouse_df)
+  mouse_df = cbind(session_data[[ses]]$feedback_type,mouse_df)
+ 
+
+  names(mouse_df)[names(mouse_df) == "session[[ses]]$feedback_type"] <- "feedback"
+  names(mouse_df)[names(mouse_df) == "session[[ses]]$contrast_left"] <- "contrast_left"
+  names(mouse_df)[names(mouse_df) == "session[[ses]]$contrast_right"] <- "contrast_right"
+
+  # names(mouse_df)[names(mouse_df) == "ses_n"] <- "session"
+  return(mouse_df)
+}
+
+
+# Create dataframe of spike freq for each mouse
+mouse.df <- function(ses_ls, mouse_df, session_data){
+  tmp1 = spk_freq(ses_ls[1], tmp, session_data)
+  for (i in ses_ls[2:length(ses_ls)]){
+    tmp = spk_freq(i, tmp, session_data)
+    if(i == ses_ls[2]){
+      mouse_df = rbind.fill(tmp1, tmp)
+    }
+    else{
+      mouse_df = rbind.fill(mouse_df, tmp)
+    }
+  }
+  return(mouse_df)
+}
+
+# Add the session number to our dataset
+ses_ls = c(1:3)
+cori.df = data.frame()
+cori.df = mouse.df(ses_ls, cori.df, session)
+cori.df[is.na(cori.df)] <- 0
+
+ses_ls = c(4:7)
+forssmann.df = data.frame()
+forssmann.df = mouse.df(ses_ls, forssmann.df, session)
+forssmann.df[is.na(forssmann.df)] <- 0
+
+ses_ls = c(8:11)
+hench.df = data.frame()
+hench.df = mouse.df(ses_ls, hench.df, session)
+hench.df[is.na(hench.df)] <- 0
+
+ses_ls = c(12:18)
+lederberg.df = data.frame()
+lederberg.df = mouse.df(ses_ls, lederberg.df, session)
+lederberg.df[is.na(lederberg.df)] <- 0
+
+# Use functions above to get spike data and mouse name
+spk_freq_2 = data.frame()
+mouse_nm = rep("Cori", dim(cori.df)[1])
+spk_freq_2 = rbind.fill(spk_freq_2, cbind(mouse_nm, cori.df))
+mouse_nm = rep("Forssmann", dim(forssmann.df)[1])
+spk_freq_2 = rbind.fill(spk_freq_2, cbind(mouse_nm, forssmann.df))
+mouse_nm = rep("Hench", dim(hench.df)[1])
+spk_freq_2 = rbind.fill(spk_freq_2, cbind(mouse_nm, hench.df))
+mouse_nm = rep("Lederberg", dim(lederberg.df)[1])
+spk_freq_2 = rbind.fill(spk_freq_2, cbind(mouse_nm, lederberg.df))
+spk_freq_2[is.na(spk_freq_2)] = 0
+
+
+colnames(spk_freq_2)[2] = "feedback"
+colnames(spk_freq_2)[3] = "contrast_right"
+colnames(spk_freq_2)[4] = "contrast_left"
+
+# Benchmark model
+ses_ls = c(1, 18)
+benchmark = data.frame()
+benchmark = mouse.df(ses_ls, benchmark, session)
+benchmark[is.na(benchmark)] <- 0
+
+colnames(benchmark)[1] = "feedback"
+colnames(benchmark)[2] = "contrast_right"
+colnames(benchmark)[3] = "contrast_left"
+```
+
+```{r}
+kable(head(spk_freq_2), format = "html", table.attr = "class='table table-striped'",digits=2) 
+
+```
+
+
+
+####  3.2 Visualizing Patterns
+
+
+```{r, fig.width=10, fig.height=20}
+
+# Plot all brain areas across all mice
+h1 <- spk_freq_2[,-c(2:4)] %>% gather("area", "count", 2:63) %>% ggplot() +
+  geom_col(mapping=aes(x=area, y=count, fill=as.factor(area))) +
+  facet_wrap(vars(mouse_nm)) +
+  scale_y_continuous(guide=guide_axis(n.dodge = 1)) +
+  coord_flip() +
+  guides(fill=guide_legend(title="Brain Area")) +
+  theme(legend.key.size = unit(0.3, "cm"),
+        legend.text = element_text(size = 3))
+
+# Plot brain areas by feedback
+h2<- spk_freq_2[,-c(1,3,4)] %>% gather("area", "count", 2:dim(spk_freq_2[,-c(1,3,4)])[2]) %>% ggplot() +
+  geom_col(mapping=aes(x=area, y=count, fill=as.factor(area))) +
+  facet_wrap(vars(feedback)) +
+  # scale_x_discrete(guide = guide_axis(n.dodge = 2)) +
+  scale_y_continuous(guide=guide_axis(n.dodge = 1)) +
+  coord_flip() +
+  guides(fill=guide_legend(title="Brain Area")) + 
+  theme(legend.key.size = unit(0.3, "cm"), 
+        legend.text = element_text(size = 3))
+
+plot_grid(h1,h2, nrow = 1, ncol = 2)
+``` 
+
+
+The first graph shows how often we see different parts of the brain during the whole experiment. We notice that the root neuron is very active in both Lederberg and Forssman, which are the mice with the highest success rates. One idea is that their success might be because these areas of their brains are more active, or they might have unique brain activity that helps them succeed in the tasks they're given (like Lederberg).
+
+Similarly, looking at the second graph illustrating the distribution of brain area activation depending on feedback, we can see that trials with positive feedback generally exhibit higher overall brain area activation compared to those with negative feedback, even if the distribution appears similar. This suggests that the correlation with feedback is more likely attributed to the total number of spikes in each trial rather than specific brain areas where they occur.
+
+####  3.3 Dimensionality Reduction (using PCA)
+
+
+Dimension reduction helps us uncover meaningful patterns in data and simplify models by selecting essential predictor variables. I'll use Principal Component Analysis (PCA) to identify informative predictor variables. PCA will be applied to each mouse separately to investigate shared brain areas that could be useful in building a prediction model.
+
+```{r}
+# PCA
+
+spk_freq_2.pca <- spk_freq_2[,6:length(spk_freq_2)]  %>% prcomp(center = TRUE, scale = TRUE)
+autoplot(spk_freq_2.pca, data = spk_freq_2.pca, loadings = TRUE, loadings.colour = 'blue',loadings.label = TRUE, loadings.label.repel=TRUE)
+
+fviz_eig(spk_freq_2.pca, addlabels = TRUE)
+fviz_pca_var(spk_freq_2.pca, col.var = "cos2",
+            gradient.cols = c("red","orange", "hotpink"),
+            repel = TRUE)
+
+```
+
+When conducting PCA, we notice a standout brain area on the cos2 plot, which illustrates the importance of each vector in creating the Principal Components (PCs). PCs aim to capture variation in data by amalgamating predictor variables. However, the PCs generated by PCA don't seem particularly useful, as each PC appears to explain a similar amount of variance in our data. Deciding on the appropriate number of PCs to include in our model is challenging based on the scree plot alone. Therefore, I won't be utilizing the PCs generated by PCA for modeling, as they don't seem to offer any improvement over using the original brain areas as predictors. Furthermore, interpreting PCs is more complex as they represent combinations of multiple brain areas.
+
+## Section IV Predictive Modeling
+
+I'll build a prediction model to forecast feedback outcomes, choosing supervised machine learning models due to their superior accuracy with labeled data. I'll explore various model types:
+
+1. **Gradient Descent Based Algorithms:** These methods minimize model error incrementally.
+
+- *Logistic Regression*: Ideal for binary classification tasks, it estimates probabilities of trial classes using maximum likelihood estimation.
+
+2. **Dimensionality Reduction:** These techniques reduce model complexity while retaining essential information.
+
+- *Linear Discriminant Analysis (LDA)*: Useful for eliminating uninformative predictors in datasets with numerous features.
+
+3. **Distance-based Algorithms:** These models classify data based on relative distances.
+
+- *K-nearest neighbors(KNN):* Effective on non-linear data, it aids in assessing variable importance for feedback prediction.
+
+- *Support Vector Machine (SVM):* Suitable for high-dimensional spaces and supervised learning tasks.
+
+4. **Tree-based Algorithms:** These methods employ decision trees for classification.
+
+- *Random Forest:* Highly accurate and robust against outliers and noise, albeit computationally intensive.
+
+For all models, I will also be doing a sensitivity analysis using ROC and AUC enhances the understanding, interpretation, and helps identify potential biases and optimize model parameters for improved models and reliability in practical applications.
+
+####  4.1 Creating Test and Train Data Set
+
+Before going into one of the models in my plan (LDA), it's assumed that the data follows a normal distribution. Therefore, I'll start by normalizing my data. Since our dataset contains more instances of positive feedback than negative, it's considered imbalanced, leading to better performance in predicting positive feedback. To solve this, I've upsampled the training dataset to ensure an equal representation of both positive and negative feedback instances.
+
+```{r}
+
+set.seed(1)
+
+# Normalize data
+process <- preProcess(as.data.frame(spk_freq_2), method=c("range"))
+mouse.norm =  predict(process, as.data.frame(spk_freq_2))
+mouse.norm = mouse.norm[,-1]
+
+# Training = 80% of data, Testing = 20% of data
+##Generate a random number that is 80% of the total number of rows in dataset.
+ran <- sample(1:nrow(spk_freq_2), 0.8 * nrow(spk_freq_2)) 
+mouse.train = mouse.norm[ran,]
+mouse.test = mouse.norm[-ran,]
+
+# Benchmark
+process <- preProcess(as.data.frame(benchmark), method=c("range"))
+benchmark.norm =  predict(process, as.data.frame(benchmark))
+
+ran <- sample(1:nrow(benchmark), 0.8 * nrow(benchmark)) 
+benchmark.train = benchmark.norm[ran,]
+benchmark.test = benchmark.norm[-ran,]
+
+
+# Upsample dataset
+up <- upSample(x=mouse.train[,-1], y=factor(mouse.train$feedback), yname="feedback")
+# count(up$feedback)
+mouse.train = up %>% relocate(feedback)
+
+```
+
+####  4.2.1 Benchmark Model
+
+For the baseline model, I developed a logistic regression model using data from sessions 1 and 18 to construct a benchmark training set, and I evaluated this model using the same test set employed for the other models.
+
+```{r}
+
+# the benchmark model is a logistic regression model 
+# uses data extracted from session 1 and 18 
+
+set.seed(1)
+
+# Create benchmark model with benchmark.norm, test with test set used by other models (mouse.test)
+log_model.benchmark <- glm(feedback ~ .,data = benchmark.norm, family = "binomial")
+predictions_log.bench <- predict(log_model.benchmark, mouse.test, type="response")
+predicted_feedback_log_bench <- (predictions_log.bench>0.5)*1
+# summary(log_model.benchmark)
+
+cm.log.bench = confusionMatrix(factor(mouse.test$feedback),factor(predicted_feedback_log_bench), mode = "everything")
+print(cm.log.bench)
+
+# ROC
+pred <- prediction(predictions_log.bench, mouse.test$feedback)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, main = "ROC Curve")
+abline(0, 1, col="red")
+auc(mouse.test$feedback, predictions_log.bench, main = "ROC Curve")
+
+```
+
+
+####  4.2.2 Logistic Regression Model
+
+```{r}
+# Logistic Regression
+
+set.seed(1)
+accuracy <- function(x){sum(diag(x)/(sum(rowSums(x)))) * 100}
+
+# Build log model
+log.model <- glm(mouse.train$feedback ~ .,data = mouse.train, family = "binomial")
+
+# Get predictions
+predictions.log <- predict(log.model, mouse.test, type="response")
+
+# Choose cut off point
+pcut1<- mean(mouse.train$feedback)
+
+# get binary prediction and confusion matrix
+predicted.feedback.log <- (predictions.log>0.5) * 1
+# summary(log.model)
+
+cm.log = confusionMatrix(factor(mouse.test$feedback),factor(predicted.feedback.log), mode = "everything")
+print(cm.log)
+
+
+```
+
+##### Sensitivity Analysis
+
+```{r}
+# ROC and AUC: Logistic Regression
+pred <- prediction(predictions.log, mouse.test$feedback)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf,col="red", main = "ROC Curve for Logistic Regression")
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+auc(mouse.test$feedback, predictions.log, main = "ROC Curve")
+
+
+# PR Curve
+pred.glm0.train<- predict(log.model, type="response")
+score1= pred.glm0.train[mouse.train$feedback==1]
+score0= pred.glm0.train[mouse.train$feedback==0]
+pr= pr.curve(score1, score0, curve = T)
+pr
+plot(pr, main="In-sample PR curve")
+
+# Out-of-sample prediction: 
+pred_glm0_test<- predict(log.model, newdata = mouse.test, type="response")
+score1.test= pred_glm0_test[mouse.test$feedback==1]
+score0.test= pred_glm0_test[mouse.test$feedback==0]
+pr.test= pr.curve(score1.test, score0.test, curve = T)
+pr.test
+plot(pr.test, main="Out-of-sample PR curve")
+
+```
+
+I opted for logistic regression due to its suitability for categorical data, making it ideal for binary classification tasks. This model provides probabilities of samples belonging to specific classes, enabling the choice of a probability cutoff for classification. While a 50% cutoff can be used for binary predicted variables, it's advisable to select a cutoff maximizing the sensitivity-specificity metric. After running logistic regression on 100 different training and testing datasets, the average accuracy on normalized data is 59.72%. Given the binary nature of our data, the expected accuracy is 50%, indicating our model performs slightly better than random chance.
+
+The ROC curve visualizes the trade-off between true positive rate (sensitivity) and false positive rate (1-specificity). Our curve appears close to the y=x line, indicative of a model performing at random. The AUC of our model is 0.6615, suggesting it's not highly accurate in predicting feedback.
+
+In contrast, the PR curve is better suited for imbalanced classes, as seen in our dataset. It depicts the relationship between precision (positive predictive power) and recall (sensitivity). Notably, our model shows similar performance on both training and testing datasets. The AUC of the training set is 0.8277, and for the testing set, it's 0.8109, indicating minimal overfitting.
+
+
+####  4.2.3 Linear Discreminant Analysis (LDA)
+
+Linear Discriminant Analysis (LDA) classifies data by projecting it onto a lower-dimensional space to maximize class separation. It requires data to have a Gaussian distribution and equal covariance matrices among classes. LDA provides both dimensionality reduction and classification capabilities.
+
+```{r}
+# LINEAR DISCREMINANT ANALYSIS [6]
+library(MASS)
+set.seed(1)
+
+theme_set(theme_classic())
+
+lda_model <- lda(feedback~., data = mouse.train)
+lda_predictions <- lda_model %>% predict(mouse.test)
+predicted_feedback_lda = lda_predictions$class
+cm.lda  = confusionMatrix(as.factor(mouse.test$feedback),as.factor(predicted_feedback_lda), mode = "everything")
+cm.lda
+```
+
+##### Sensitivity Analysis
+
+```{r}
+
+# ROC and AUC: LDA
+pred <- prediction(lda_predictions$posterior[,2], mouse.test$feedback)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, col="red",main = "ROC Curve for LDA")
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+auc(mouse.test$feedback, lda_predictions$posterior[,2])
+
+# PR Curve
+lda_model.train <- predict(lda_model, type="response")
+score1= lda_model.train$x[mouse.train$feedback==1]
+score0= lda_model.train$x[mouse.train$feedback==0]
+pr= pr.curve(score1, score0, curve = T)
+plot(pr, main="In-sample PR curve")
+
+# Out-of-sample prediction: 
+lda_model.test <- predict(lda_model, type="response")
+score1.test= lda_model.test$x[mouse.test$feedback==1]
+score0.test= lda_model.test$x[mouse.test$feedback==0]
+pr.test= pr.curve(score1.test, score0.test, curve = T)
+plot(pr.test, main="Out-of-sample PR curve")
+
+
+```
+
+
+LDA outperforms logistic regression with an average accuracy of 73.08%, though it remains relatively modest in accuracy. The AUC for our LDA model is 0.6564, falling short of the threshold for a "good model," typically set above 0.7. While a perfect model would achieve an AUC of 1, such accuracy may indicate overfitting.
+
+
+####  4.2.4 K-Nearest Neighbors (KNN)
+
+K-nearest neighbors (KNN) is a non-parametric algorithm suited for non-linear data, as it makes no assumptions about the shape of the decision boundary. It operates by computing the distance between each data point and all others, then selecting the k nearest neighbors to classify based on the most frequent label.
+
+To optimize our KNN model, we'll conduct k-fold cross-validation to determine the ideal value of k. This technique involves splitting the data into k subsets, training the model on k-1 subsets, and testing it on the remaining subset. This process is repeated k times, and the average accuracy is calculated to assess model performance.
+
+```{r, cache=TRUE}
+# k-Nearest Neighbors
+
+library(class)
+
+repeats = 5
+numbers = 15
+tunel = 20
+
+mouse.norm$feedback = factor(mouse.norm$feedback)
+levels(mouse.norm$feedback) <- make.names(levels(factor(mouse.norm$feedback)))
+
+# k-fold cross validation to choose optimal k
+x = trainControl(method = 'repeatedcv',number = numbers,repeats = repeats,classProbs = TRUE,
+summaryFunction = twoClassSummary)
+
+knn.model <- train(feedback~. , data = mouse.norm, method = 'knn',
+                preProcess = c('center','scale'),
+                trControl = x,
+                metric = 'ROC',
+                tuneLength = tunel)
+knn.model
+plot(knn.model)
+
+knn.pred <- predict(knn.model,mouse.test[,-1], type = 'prob')
+knn.pred.feedback <-prediction(knn.pred[,2],mouse.test$feedback)
+
+cm.knn  = confusionMatrix(as.factor(mouse.test$feedback),as.factor((knn.pred[,2]>0.5)*1), mode = "everything")
+print(cm.knn)
+
+head(mouse.norm)
+class(mouse.norm$feedback)
+```
+
+Here, ROC (Repeated Cross Validation) is employed as a metric to train the KNN model, which utilizes bootstrapping to further split the training dataset into subsets for refining the model. This process is repeated a specified number of times, with 5 repetitions chosen here. The tuneLength parameter specifies the number of tuning parameters the model should explore to optimize performance. For knn models, a crucial parameter is k, representing the number of nearest neighbors, which trainControl automatically selects.
+
+As knn relies on data similarities and distance metrics for accurate predictions, it doesn't necessitate a separate training dataset. Instead, the normalized mouse dataset is used directly to generate the model, although the normalization step may not be essential as the training function likely preprocesses the dataset internally.
+
+
+##### Sensitivity Analysis
+
+```{r}
+# ROC and AUC: knn
+perf_val <- performance(knn.pred.feedback,'auc')
+perf_val
+
+perf_val <- performance(knn.pred.feedback, 'tpr', 'fpr')
+plot(perf_val, col="red", lwd = 1.5, main = "ROC curve for KNN")
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+
+knn.predicted = (knn.pred[,2]>0.5)*1
+
+auc(mouse.test$feedback,knn.predicted)
+
+```
+
+####  4.2.6 Random Forest
+
+Random forest is a machine learning model akin to decision trees, but it incorporates bootstrapping to generate multiple sample datasets. Bootstrapping selects a predetermined number of data points with replacement, potentially leaving out certain points. The excluded points are then used to compute the out-of-bag error rate (OOB), indicating the model's error on unseen data. The selection of mtry (number of features considered at each split) aims to minimize the OOB error.
+
+With no underlying assumptions about the data, random forest offers enhanced flexibility and potential accuracy compared to regression models like logistic regression. It mitigates overfitting, a common issue with decision trees. Moreover, random forest models are easier to interpret, resembling an amalgamation of decision trees. This allows for the generation of feature importance plots, revealing the significance of each feature for predictions.
+
+```{r, cache=TRUE}
+# Random Forest
+
+library(randomForest)
+set.seed(1)
+
+# Select mtry value with minimum out of bag(OOB) error.
+mtry <- tuneRF(mouse.train[-1],mouse.train$feedback, ntreeTry=500,
+               stepFactor=1.5,improve=0.01, trace=TRUE, plot=TRUE)
+best.m <- mtry[mtry[, 2] == min(mtry[, 2]), 1]
+print(mtry)
+print(best.m)
+
+# build model with best mtry value
+rf <-randomForest(as.factor(feedback)~.,data=mouse.train, mtry=best.m, importance=TRUE,ntree=500)
+print(rf)
+
+#Evaluate variable importance
+importance(rf)
+varImpPlot(rf)
+
+# prediction
+rf.pred <- predict(rf, mouse.test[,-1], type = 'prob')
+rf.predicted = (rf.pred[,2]>0.5) * 1
+
+# Confusion matrix
+cm.rf = confusionMatrix(factor(mouse.test$feedback),factor(rf.predicted), mode = "everything")
+print(cm.rf)
+
+
+```
+
+The variable importance plot illustrates the significance of each variable in classifying the data. It quantifies this importance through two metrics: MeanDecreaseAccuracy, indicating the decrease in accuracy if the variable is excluded from the model, and MeanDecreaseGini, measuring the variable's contribution to node and leaf homogeneity. Higher values in both metrics indicate greater importance of the predictor variable. In the presented graphs, contrast, root, and CA3 emerge as particularly influential variables in generating the random forest model.
+
+##### Sensitivity Analysis
+
+```{r}
+# prediction
+perf = prediction(rf.pred[,2], mouse.test$feedback)
+
+# 1. Area under curve
+auc = performance(perf, measure = "auc")
+auc
+# 2. True Positive and Negative Rate
+pred3 = performance(perf, "tpr","fpr")
+# 3. Plot the ROC curve
+plot(pred3,main="ROC Curve for Random Forest",col=2,lwd=2)
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+
+auc(mouse.test$feedback,rf.predicted)
+```
+
+
+####  4.2.7 Support Vector Machine (SVM)
+
+Support Vector Machines (SVMs) operate by mapping data into a higher-dimensional space to identify a hyperplane that effectively separates data points while maximizing margins. Various kernel functions can be employed to map data into this higher-dimensional space, with the radial basis function (RBF) selected here for its capability in handling nonlinear relationships between class and predictor variables. Additionally, C-classification is chosen as the SVM type, aligning with the objective of classifying feedback in this context.
+
+
+```{r, cache=TRUE}
+# Support Vector Machine
+
+library(caTools)
+library(e1071)
+set.seed(1)
+
+svm.model = svm(formula = feedback ~ .,
+                 data = mouse.train,
+                 type = 'C-classification', 
+                 kernel = 'radial')
+
+# Predicting the Test set results
+svm.pred = predict(svm.model, newdata = mouse.test[-1])
+
+# Making the Confusion Matrix
+cm.svm  = confusionMatrix(as.factor(mouse.test$feedback),as.factor(svm.pred), mode = "everything")
+cm.svm
+
+```
+
+##### Sensitivity Analysis
+
+
+```{r}
+# plot(svm.model, mouse.norm.train, root ~ CA3)
+
+# ROC
+roc_svm_test <- roc(response = mouse.test$feedback, predictor =as.numeric(svm.pred))
+
+plot(roc_svm_test, col="red", lwd = 1.5, main = "ROC Curve for SVM")
+auc(mouse.test$feedback,as.numeric(svm.pred))
+
+
+# [25]
+```
+
+
+## Section V Prediction Performance on Test Sets 
+
+####  Importing & Formatting Test Data
+
+```{r}
+# Read in test data
+test_session=list()
+for(i in 1:2){
+  test_session[[i]]=readRDS(paste('./Data/test/test',i,'.rds',sep=''))
+  # print(test[[i]]$mouse_name)
+  # print(test[[i]]$date_exp)
+}
+```
+
+
+```{r}
+# Format test as dataframe
+session_list = c(1, 2)
+test = data.frame(matrix(ncol=length(colnames(mouse.norm))))
+test_tmp = data.frame()
+colnames(test) = colnames(mouse.norm)
+test_tmp = mouse.df(session_list, test_tmp, test_session)
+colnames(test_tmp)[1] = "feedback"
+colnames(test_tmp)[2] = "contrast_right"
+colnames(test_tmp)[3] = "contrast_left"
+test = right_join(test, test_tmp)
+test[is.na(test)] <- 0
+
+table(test$feedback)
+
+# Normalize data
+process <- preProcess(as.data.frame(test), method=c("range"))
+test.norm =  predict(process, as.data.frame(test))
+
+```
+
+Here, I will be predicting feedback using the KNN model (which has the highest training accuracy among all other models):
+```{r}
+# Predict feedback using knn model
+knn.pred.test <- predict(knn.model, test.norm[,-1], type = 'prob')
+knn.pred.test.feedback <-prediction(knn.pred.test[,2], test.norm$feedback)
+cm.knn.test  = confusionMatrix(as.factor(test.norm$feedback),as.factor((knn.pred.test[,2]>0.5)*1), mode = "everything")
+knn.predicted.test = (knn.pred.test[,2]>0.5)*1
+
+print(cm.knn.test)
+```
+
+
+####  Model Accuracies
+
+```{r}
+# Model Accuracy
+
+final_metrics <- function(df.test, pred, cm, model_name){
+  row = c(model_name, 
+round(cm$overall["Accuracy"]*100, digits=2), 
+round(cm$byClass["Balanced Accuracy"]*100, digits=2),
+round(cm$byClass["F1"]*100, digits=2),
+round(auc(df.test$feedback, pred), digits=3),
+round(cm$byClass["Sensitivity"]*100, digits=2), 
+round(cm$byClass["Specificity"]*100, digits=2), 
+round(cm$byClass["Precision"]*100, digits=2), 
+round(cm$byClass["Recall"]*100, digits=2))
+}
+acc = data.frame(matrix(ncol=9))
+colnames(acc) = c("Model", "Accuracy (%)", "Balanced Accuracy(%)", "F1-Score", "AUC", "Sensitivity", "Specificity", "Precision", "Recall")
+
+
+acc[nrow(acc), ] = final_metrics(mouse.test, predictions_log.bench, cm.log.bench, "Benchmark (LR)")
+acc[nrow(acc)+1,] = final_metrics(mouse.test, predictions.log, cm.log, "Logistic Regression")
+acc[nrow(acc)+1,] = final_metrics(mouse.test, lda_predictions$posterior[,2], cm.lda, "LDA")
+acc[nrow(acc)+1,] = final_metrics(mouse.test, knn.predicted, cm.knn, "KNN")
+acc[nrow(acc)+1,] = final_metrics(mouse.test, rf.predicted, cm.rf, "Random Forest")
+acc[nrow(acc)+1,] =  final_metrics(mouse.test, as.numeric(svm.pred), cm.svm, "SVM")
+acc[nrow(acc), ] = final_metrics(test, knn.predicted.test, cm.knn.test, "Test Set (KNN)")
+
+kable(acc, align = c("l","r", "c", "c", "r", "r", "r", "r", "r"))
+```
+
+## Section VI Discussion
+
+Despite not having all predictor variables and facing an imbalance with more positive than negative feedback, the KNN model performs well on the test set with an accuracy of 76%. 
+
+Using balanced accuracy and F1-score as evaluation metrics is more appropriate due to the dataset's imbalance. The F1-score considers both precision and recall, with a perfect score indicating ideal performance. KNN outperforms other models in balanced accuracy and F1 score. The AUC, measuring the area under the ROC curve, is also considered, with the benchmark showing better performance, even with a low F1 score. Among the models, K-Nearest Neighbors stands out with the highest accuracy, balanced accuracy, AUC, and a relatively high F1 score. Non-parametric models like knn, Random Forest, and SVM perform better than parametric ones, suggesting non-linearity in the data. Precision, recall, sensitivity, and specificity are essential metrics for evaluating model performance, especially in an imbalanced dataset where models may struggle to differentiate between positive and negative feedback. Overall, the models exhibit better performance in specificity, sensitivity, and recall, indicating their ability to find positive results but less so in distinguishing positive from negative feedback.
+
+
+## Acknowledgement of Resources
+
+
+1.  https://machinelearningmastery.com/roc-curves-and-precision-recall-urves-for-classification-in-python/
+2.  https://www.statology.org/logistic-regression-in-r/
+3.  https://www.analyticsvidhya.com/blog/2020/04/feature-scaling-achine-learning-normalization-standardization/
+4.  https://www.statology.org/lasso-regression-in-r/
+https://www.datacamp.com/tutorial/pca-analysis-r
+5.  https://www.geeksforgeeks.org/linear-discriminant-analysis-in-r-rogramming/
+6.  https://www.statology.org/train-test-split-r/
+7.  https://towardsdatascience.com/k-nearest-neighbors-algorithm-with-xamples-in-r-simply-explained-knn-1f2c88da405c
+8. https://www.r-bloggers.com/2022/07/how-to-standardize-data-in-r/
+9.  https://rpubs.com/harshaash/logistic_regression
+10.  https://www.digitalocean.com/community/tutorials/normalize-data-in
+11.  https://rpubs.com/esobolewska/pcr-step-by-step
+12.  https://homepages.uc.edu/~lis6/Teaching/ML19Spring/Lab/lab7_logit.html#naive-choice-of-cut-off-probability
+13. Chat GPT
+14. Professor & TA's materials 
+15. https://www.datacamp.com/tutorial/k-nearest-neighbors-knn-classification-with-r-tutorial
+16. https://www.r-bloggers.com/2021/05/linear-discriminant-analysis-in-r/
+17. https://emeritus.org/in/learn/types-of-supervised-learning/
+
+
+## Appendix
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```
+
+
+
+
+
+
+
